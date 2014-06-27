@@ -2,27 +2,51 @@ create or replace PACKAGE BODY PPTX_CREATOR_PKG
 AS
 
   /*
+    Types
+  */
+  TYPE t_single_slide IS RECORD
+    ( slide_num NUMBER
+    , slide_id NUMBER
+    , relation_id NUMBER
+    , slide_data CLOB
+    , notes_data CLOB
+    );
+
+  TYPE t_all_slides IS TABLE OF t_single_slide INDEX BY PLS_INTEGER;
+
+  TYPE t_templates IS RECORD
+    ( slide CLOB
+    , slide_relations CLOB
+    , notes CLOB
+    , notes_relations CLOB
+    );
+  /*
     Constants
   */
-  c_content_types_fname CONSTANT VARCHAR(200) := '[Content_Types].xml';
-  c_presentation_fname CONSTANT VARCHAR2(200) := 'ppt/presentation.xml';
-  c_pres_rel_fname CONSTANT VARCHAR2(200) := 'ppt/_rels/presentation.xml.rels';
+  c_content_types_fname CONSTANT VARCHAR(19 CHAR) := '[Content_Types].xml';
+  c_presentation_fname CONSTANT VARCHAR2(20 CHAR) := 'ppt/presentation.xml';
+  c_pres_rel_fname CONSTANT VARCHAR2(31 CHAR) := 'ppt/_rels/presentation.xml.rels';
   
-  c_template_slide CONSTANT VARCHAR2(200) := 'ppt/slides/slide1.xml';
-  c_template_slide_rel CONSTANT VARCHAR2(200) := 'ppt/slides/_rels/slide1.xml.rels';
-  c_template_note CONSTANT VARCHAR2(200) := 'ppt/notesSlides/notesSlide1.xml';
-  c_template_note_rel CONSTANT VARCHAR2(200) := 'ppt/notesSlides/_rels/notesSlide1.xml.rels';
+  c_template_slide CONSTANT VARCHAR2(21 CHAR) := 'ppt/slides/slide1.xml';
+  c_template_slide_rel CONSTANT VARCHAR2(32 CHAR) := 'ppt/slides/_rels/slide1.xml.rels';
+  c_template_notes CONSTANT VARCHAR2(31 CHAR) := 'ppt/notesSlides/notesSlide1.xml';
+  c_template_notes_rel CONSTANT VARCHAR2(42 CHAR) := 'ppt/notesSlides/_rels/notesSlide1.xml.rels';
   
-  c_slide_dname CONSTANT VARCHAR2(200) := 'ppt/slides/';
-  c_slide_rel_dname CONSTANT VARCHAR2(200) := 'ppt/slides/_rels/';
+  c_slide_dname CONSTANT VARCHAR2(11 CHAR) := 'ppt/slides/';
+  c_slide_rel_dname CONSTANT VARCHAR2(17 CHAR) := 'ppt/slides/_rels/';
+  c_notes_dname CONSTANT VARCHAR2(16 CHAR) := 'ppt/notesSlides/';
   
-  c_slide_pattern CONSTANT VARCHAR2(200) := 'slide#NUM#.xml';
-  c_relation_suffix CONSTANT VARCHAR2(200) := '.rels';
+  c_slide_pattern CONSTANT VARCHAR2(14 CHAR) := 'slide#NUM#.xml';
+  c_relation_suffix CONSTANT VARCHAR2(5 CHAR) := '.rels';
 
-  c_note_content_type CONSTANT VARCHAR2(200) := 'application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml';
-  c_override_pattern CONSTANT VARCHAR2(200) := '<Override PartName="/ppt/slides/slide#NUM#.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>';
-  c_presentation_slide CONSTANT VARCHAR2(200) := '<p:sldId id="#SLIDE_ID#" r:id="rId#REL_ID#"/>';
-  c_pres_rel_pattern CONSTANT VARCHAR2(200) := '<Relationship Id="rId#REL_ID#" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide#NUM#.xml"/>';
+  c_slide_content_type CONSTANT VARCHAR2(70 CHAR) := 'application/vnd.openxmlformats-officedocument.presentationml.slide+xml';
+  c_sliderel_content_type CONSTANT VARCHAR2(73 CHAR) := 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide';
+  c_note_content_type CONSTANT VARCHAR2(75 CHAR) := 'application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml';
+  c_override_pattern CONSTANT VARCHAR2(134 CHAR) := '<Override PartName="/ppt/slides/slide#NUM#.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>';
+  c_presentation_slide CONSTANT VARCHAR2(45 CHAR) := '<p:sldId id="#SLIDE_ID#" r:id="rId#REL_ID#"/>';
+  c_pres_rel_pattern CONSTANT VARCHAR2(144 CHAR) := '<Relationship Id="rId#REL_ID#" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide#NUM#.xml"/>';
+
+  c_note_rel_template CONSTANT VARCHAR2(140 CHAR) := '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="../slides/slide#NUM#.xml"/>';
 
   c_slide_num_offset CONSTANT NUMBER := 0;
 
@@ -35,8 +59,7 @@ AS
   g_slide_id_offset NUMBER := 255;
   g_slide_relation_id_offset NUMBER := 6;
 
-  g_template_slide CLOB;
-  g_template_slide_rel BLOB;
+  g_templates t_templates;
   g_slides t_all_slides;
   
 
@@ -86,8 +109,10 @@ AS
   PROCEDURE set_template_slide
   AS
   BEGIN
-    g_template_slide := sql_util_pkg.blob_to_clob( zip_util_pkg.get_file( g_base_file, c_template_slide ) );
-    g_template_slide_rel := zip_util_pkg.get_file( g_base_file, c_template_slide_rel );
+    g_templates.slide := sql_util_pkg.blob_to_clob( zip_util_pkg.get_file( g_base_file, c_template_slide ) );
+    g_templates.slide_relations := sql_util_pkg.blob_to_clob( zip_util_pkg.get_file( g_base_file, c_template_slide_rel ) );
+    g_templates.notes := sql_util_pkg.blob_to_clob( zip_util_pkg.get_file( g_base_file, c_template_notes ) );
+    g_templates.notes_relations := sql_util_pkg.blob_to_clob( zip_util_pkg.get_file( g_base_file, c_template_notes_rel ) );
   END set_template_slide;
   
   PROCEDURE process_slides
@@ -113,7 +138,7 @@ AS
     LOOP
       l_element := dbms_xmldom.createElement(l_domdoc, 'Override');
       dbms_xmldom.setAttribute(l_element, 'PartName', '/' || c_slide_dname || REPLACE(c_slide_pattern, '#NUM#', to_char(g_slides(i).slide_num)) );
-      dbms_xmldom.setAttribute(l_element, 'ContentType', g_slides(i).content_type);
+      dbms_xmldom.setAttribute(l_element, 'ContentType', c_slide_content_type);
       l_slide_node := dbms_xmldom.appendChild(l_root_node, dbms_xmldom.makeNode(l_element));
     END LOOP;
     dbms_xmldom.freeDocument(l_domdoc);
@@ -169,7 +194,7 @@ AS
     LOOP
       l_element := dbms_xmldom.createElement(l_domdoc, 'Relationship');
       dbms_xmldom.setAttribute(l_element, 'Id', 'rId' || to_char(g_slides(i).relation_id));
-      dbms_xmldom.setAttribute(l_element, 'Type', g_slides(i).relation_type);
+      dbms_xmldom.setAttribute(l_element, 'Type', c_sliderel_content_type);
       dbms_xmldom.setAttribute(l_element, 'Target', 'slides/' || REPLACE(c_slide_pattern, '#NUM#', to_char(g_slides(i).slide_num)));
       l_slide_node := dbms_xmldom.appendChild(l_root_node, dbms_xmldom.makeNode(l_element));
     END LOOP;
@@ -204,11 +229,12 @@ AS
       l_current_slide.slide_num := c_slide_num_offset + i;
       l_current_slide.slide_id := g_slide_id_offset + i;
       l_current_slide.relation_id := g_slide_relation_id_offset + i;
-      l_current_slide.slide_data := string_util_pkg.multi_replace ( g_template_slide, p_replace_patterns, p_replace_values(i));
+      l_current_slide.slide_data := string_util_pkg.multi_replace ( g_templates.slide, p_replace_patterns, p_replace_values(i));
       g_slides(i) := l_current_slide;
+      /* TODO: move adding slides to ZIP into general zip processing loop, use ZIP_UTIL with CLOB */
       l_cur_blob := sql_util_pkg.clob_to_blob (l_current_slide.slide_data);
       zip_util_pkg.add_file (l_retval, c_slide_dname || REPLACE(c_slide_pattern, '#NUM#', to_char(l_current_slide.slide_num)), l_cur_blob);
-      zip_util_pkg.add_file (l_retval, c_slide_rel_dname || REPLACE(c_slide_pattern, '#NUM#', to_char(l_current_slide.slide_num)) || c_relation_suffix, g_template_slide_rel);
+      zip_util_pkg.add_file (l_retval, c_slide_rel_dname || REPLACE(c_slide_pattern, '#NUM#', to_char(l_current_slide.slide_num)) || c_relation_suffix, g_templates.slide_relations);
     END LOOP;
     
     -- slides prepared, loop through file content and adapt where needed
@@ -226,7 +252,7 @@ AS
         l_cur_blob := update_pres_rel(l_cur_blob); --update presentation rels with slide infos
       END IF;
       
-      IF g_file_list(i) NOT LIKE c_slide_dname || '%'  -- ignore all files in ppt/slides folder, those were generated above
+      IF g_file_list(i) NOT LIKE c_slide_dname || '%'  -- ignore all files in ppt/slides and notesSlides folder, those were generated above
       THEN
         zip_util_pkg.add_file (l_retval, g_file_list(i), l_cur_blob);
       END IF;      
