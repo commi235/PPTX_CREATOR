@@ -82,7 +82,7 @@ AS
     l_match_right NUMBER;
   BEGIN
     -- presentation to get slide Ids
-    l_clob := sql_util_pkg.blob_to_clob(zip_util_pkg.get_file( g_base_file, c_presentation_fname ));
+    l_clob := zip_util_pkg.get_file_clob( g_base_file, c_presentation_fname );
     l_match_left := INSTR(l_clob, 'sldId');
     l_match_left := INSTR(l_clob, '"', l_match_left);
     l_match_right := INSTR(l_clob, '"', l_match_left + 1);
@@ -92,7 +92,7 @@ AS
     END IF;
     
     -- presentation rels to get rId
-    l_data := XMLTYPE(sql_util_pkg.blob_to_clob(zip_util_pkg.get_file( g_base_file, c_pres_rel_fname )));
+    l_data := XMLTYPE(zip_util_pkg.get_file_clob( g_base_file, c_pres_rel_fname ));
     l_domdoc := dbms_xmldom.newDOMDocument(l_data);
     l_root_node := dbms_xmldom.makeNode(DBMS_XMLDOM.getDocumentElement(l_domdoc));
     l_rels := dbms_xmldom.getChildNodes(l_root_node);
@@ -109,10 +109,10 @@ AS
   PROCEDURE set_template_slide
   AS
   BEGIN
-    g_templates.slide := sql_util_pkg.blob_to_clob( zip_util_pkg.get_file( g_base_file, c_template_slide ) );
-    g_templates.slide_relations := sql_util_pkg.blob_to_clob( zip_util_pkg.get_file( g_base_file, c_template_slide_rel ) );
-    g_templates.notes := sql_util_pkg.blob_to_clob( zip_util_pkg.get_file( g_base_file, c_template_notes ) );
-    g_templates.notes_relations := sql_util_pkg.blob_to_clob( zip_util_pkg.get_file( g_base_file, c_template_notes_rel ) );
+    g_templates.slide := zip_util_pkg.get_file_clob( g_base_file, c_template_slide );
+    g_templates.slide_relations := zip_util_pkg.get_file_clob( g_base_file, c_template_slide_rel );
+    g_templates.notes := zip_util_pkg.get_file_clob( g_base_file, c_template_notes );
+    g_templates.notes_relations := zip_util_pkg.get_file_clob( g_base_file, c_template_notes_rel );
   END set_template_slide;
   
   PROCEDURE process_slides
@@ -122,8 +122,7 @@ AS
   END process_slides;
 
   -- Insert override tags into content types for each slide
-  FUNCTION update_content_types (p_data IN BLOB)
-  RETURN BLOB
+  PROCEDURE update_content_types
   AS
     l_data XMLTYPE;
     l_domdoc dbms_xmldom.DOMDocument;
@@ -131,7 +130,7 @@ AS
     l_element dbms_xmldom.DOMElement;
     l_slide_node dbms_xmldom.DOMNode;
   BEGIN
-    l_data := XMLTYPE(sql_util_pkg.blob_to_clob(p_data));
+    l_data := XMLTYPE(zip_util_pkg.get_file_clob(g_base_file, c_content_types_fname));
     l_domdoc := dbms_xmldom.newDOMDocument(l_data);
     l_root_node := dbms_xmldom.makeNode(DBMS_XMLDOM.getDocumentElement(l_domdoc));
     FOR i IN 2..g_slides.COUNT
@@ -142,12 +141,11 @@ AS
       l_slide_node := dbms_xmldom.appendChild(l_root_node, dbms_xmldom.makeNode(l_element));
     END LOOP;
     dbms_xmldom.freeDocument(l_domdoc);
-    RETURN sql_util_pkg.clob_to_blob(REPLACE(l_data.getClobVal, 'ISO-8859-15', 'UTF-8'));
+    zip_util_pkg.add_file(g_base_file, c_content_types_fname, REPLACE(l_data.getClobVal, 'ISO-8859-15', 'UTF-8'));
   END update_content_types;
 
   -- Insert slide id tag into slide id list of presentation for each slide
-  FUNCTION update_presentation (p_data IN BLOB)
-  RETURN BLOB
+  PROCEDURE update_presentation
   AS
     l_data XMLTYPE;
     l_domdoc dbms_xmldom.DOMDocument;
@@ -158,7 +156,7 @@ AS
     l_id_attr dbms_xmldom.DOMAttr;
     l_rid_attr dbms_xmldom.DOMAttr;
   BEGIN
-    l_data := XMLTYPE(sql_util_pkg.blob_to_clob(p_data));
+    l_data := XMLTYPE(zip_util_pkg.get_file_clob(g_base_file, c_presentation_fname));
     l_domdoc := dbms_xmldom.newDOMDocument(l_data);
     l_root_node := dbms_xmldom.makeNode(DBMS_XMLDOM.getDocumentElement(l_domdoc));
     l_slide_list := dbms_xmldom.item(dbms_xmldom.getElementsByTagName(l_domdoc, 'sldIdLst'), 0);
@@ -174,12 +172,11 @@ AS
       l_slide_node := dbms_xmldom.appendChild(l_slide_list, dbms_xmldom.makeNode(l_element));
     END LOOP;
     dbms_xmldom.freeDocument(l_domdoc);
-    RETURN sql_util_pkg.clob_to_blob(REPLACE(l_data.getClobVal, 'ISO-8859-15', 'UTF-8'));
+    zip_util_pkg.add_file(g_base_file, c_presentation_fname, REPLACE(l_data.getClobVal, 'ISO-8859-15', 'UTF-8'));
   END update_presentation;
   
   -- Insert relationship tag into presenation relations for every slide
-  FUNCTION update_pres_rel (p_data IN BLOB)
-  RETURN BLOB
+  PROCEDURE update_pres_rel
   AS
     l_data XMLTYPE;
     l_domdoc dbms_xmldom.DOMDocument;
@@ -187,7 +184,7 @@ AS
     l_element dbms_xmldom.DOMElement;
     l_slide_node dbms_xmldom.DOMNode;
   BEGIN
-    l_data := XMLTYPE(sql_util_pkg.blob_to_clob(p_data));
+    l_data := XMLTYPE(zip_util_pkg.get_file_clob(g_base_file, c_pres_rel_fname));
     l_domdoc := dbms_xmldom.newDOMDocument(l_data);
     l_root_node := dbms_xmldom.makeNode(DBMS_XMLDOM.getDocumentElement(l_domdoc));
     FOR i IN 2..g_slides.COUNT
@@ -199,7 +196,7 @@ AS
       l_slide_node := dbms_xmldom.appendChild(l_root_node, dbms_xmldom.makeNode(l_element));
     END LOOP;
     dbms_xmldom.freeDocument(l_domdoc);
-    RETURN sql_util_pkg.clob_to_blob(REPLACE(l_data.getClobVal, 'ISO-8859-15', 'UTF-8'));
+    zip_util_pkg.add_file(g_base_file, c_pres_rel_fname, REPLACE(l_data.getClobVal, 'ISO-8859-15', 'UTF-8'));
   END update_pres_rel;
   
 
@@ -230,32 +227,27 @@ AS
       l_current_slide.slide_id := g_slide_id_offset + i;
       l_current_slide.relation_id := g_slide_relation_id_offset + i;
       l_current_slide.slide_data := string_util_pkg.multi_replace ( g_templates.slide, p_replace_patterns, p_replace_values(i));
+      /* TODO: Also replace values in notesSlide if it exists */
       g_slides(i) := l_current_slide;
-      /* TODO: move adding slides to ZIP into general zip processing loop, use ZIP_UTIL with CLOB */
-      l_cur_blob := sql_util_pkg.clob_to_blob (l_current_slide.slide_data);
-      zip_util_pkg.add_file (l_retval, c_slide_dname || REPLACE(c_slide_pattern, '#NUM#', to_char(l_current_slide.slide_num)), l_cur_blob);
+      zip_util_pkg.add_file (l_retval, c_slide_dname || REPLACE(c_slide_pattern, '#NUM#', to_char(l_current_slide.slide_num)), l_current_slide.slide_data);
+      /* TODO: slide_relations need update if notes exist */
       zip_util_pkg.add_file (l_retval, c_slide_rel_dname || REPLACE(c_slide_pattern, '#NUM#', to_char(l_current_slide.slide_num)) || c_relation_suffix, g_templates.slide_relations);
+      /* TODO: put generated notes and corresponding relations file into zip */
     END LOOP;
     
     -- slides prepared, loop through file content and adapt where needed
     FOR i IN 1..g_file_list.COUNT
     LOOP
-      l_cur_blob := zip_util_pkg.get_file (p_template, g_file_list(i));
       IF g_file_list(i) = c_content_types_fname
       THEN
-        l_cur_blob := update_content_types(l_cur_blob); --update content types file with overrides for slides
+        update_content_types; --update content types file with overrides for slides
       ELSIF g_file_list(i) = c_presentation_fname
       THEN
-        l_cur_blob := update_presentation(l_cur_blob); -- update presentation file with slide refs
+        update_presentation; -- update presentation file with slide refs
       ELSIF g_file_list(i) = c_pres_rel_fname
       THEN
-        l_cur_blob := update_pres_rel(l_cur_blob); --update presentation rels with slide infos
+        update_pres_rel; --update presentation rels with slide infos
       END IF;
-      
-      IF g_file_list(i) NOT LIKE c_slide_dname || '%'  -- ignore all files in ppt/slides and notesSlides folder, those were generated above
-      THEN
-        zip_util_pkg.add_file (l_retval, g_file_list(i), l_cur_blob);
-      END IF;      
     END LOOP;
     zip_util_pkg.finish_zip (l_retval);
     RETURN l_retval;
