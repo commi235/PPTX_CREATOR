@@ -4,6 +4,14 @@ AS
   /*
     Types
   */
+  /**
+  * Record which holds all data about a single slide
+  * @param slide_num
+  * @param slide_id
+  * @param relation_id
+  * @param slide_data
+  * @param notes_data
+  */
   TYPE t_single_slide IS RECORD
     ( slide_num NUMBER
     , slide_id NUMBER
@@ -12,41 +20,55 @@ AS
     , notes_data CLOB
     );
 
+  /**
+  * Array of slide details
+  */
   TYPE t_all_slides IS TABLE OF t_single_slide INDEX BY PLS_INTEGER;
 
+  /**
+  * Record to keep all relevant templates together
+  * @param slide The template slide with substitution patterns
+  * @param slide_relations Template slide relations
+  * @param notes The template notes with substitution patterns
+  * @param notes_relations Template notes relations
+  */
   TYPE t_templates IS RECORD
     ( slide CLOB
     , slide_relations CLOB
     , notes CLOB
     , notes_relations CLOB
     );
+    
   /*
     Constants
   */
+  
+  /* Static filenames for top level files */
   c_content_types_fname CONSTANT VARCHAR(19 CHAR) := '[Content_Types].xml';
   c_presentation_fname CONSTANT VARCHAR2(20 CHAR) := 'ppt/presentation.xml';
   c_pres_rel_fname CONSTANT VARCHAR2(31 CHAR) := 'ppt/_rels/presentation.xml.rels';
   
+  /* Filenames for templates */
   c_template_slide CONSTANT VARCHAR2(21 CHAR) := 'ppt/slides/slide1.xml';
   c_template_slide_rel CONSTANT VARCHAR2(32 CHAR) := 'ppt/slides/_rels/slide1.xml.rels';
   c_template_notes CONSTANT VARCHAR2(31 CHAR) := 'ppt/notesSlides/notesSlide1.xml';
   c_template_notes_rel CONSTANT VARCHAR2(42 CHAR) := 'ppt/notesSlides/_rels/notesSlide1.xml.rels';
   
+  /* Directories for slides and notes */
   c_slide_dname CONSTANT VARCHAR2(11 CHAR) := 'ppt/slides/';
   c_slide_rel_dname CONSTANT VARCHAR2(17 CHAR) := 'ppt/slides/_rels/';
   c_notes_dname CONSTANT VARCHAR2(16 CHAR) := 'ppt/notesSlides/';
+  c_notes_rel_dname CONSTANT VARCHAR2(22 CHAR) := 'ppt/notesSlides/_rels/';
   
-  c_slide_pattern CONSTANT VARCHAR2(14 CHAR) := 'slide#NUM#.xml';
+  /* Template filenames for slide and notes */
+  c_slide_fname_pattern CONSTANT VARCHAR2(14 CHAR) := 'slide#NUM#.xml';
+  c_notes_fname_pattern CONSTANT VARCHAR2(20 CHAR) := 'notesSlide#NUM#.xml';
   c_relation_suffix CONSTANT VARCHAR2(5 CHAR) := '.rels';
 
   c_slide_content_type CONSTANT VARCHAR2(70 CHAR) := 'application/vnd.openxmlformats-officedocument.presentationml.slide+xml';
   c_sliderel_content_type CONSTANT VARCHAR2(73 CHAR) := 'http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide';
-  c_note_content_type CONSTANT VARCHAR2(75 CHAR) := 'application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml';
-  c_override_pattern CONSTANT VARCHAR2(134 CHAR) := '<Override PartName="/ppt/slides/slide#NUM#.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>';
+  c_notes_content_type CONSTANT VARCHAR2(75 CHAR) := 'application/vnd.openxmlformats-officedocument.presentationml.notesSlide+xml';
   c_presentation_slide CONSTANT VARCHAR2(45 CHAR) := '<p:sldId id="#SLIDE_ID#" r:id="rId#REL_ID#"/>';
-  c_pres_rel_pattern CONSTANT VARCHAR2(144 CHAR) := '<Relationship Id="rId#REL_ID#" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="slides/slide#NUM#.xml"/>';
-
-  c_note_rel_template CONSTANT VARCHAR2(140 CHAR) := '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide" Target="../slides/slide#NUM#.xml"/>';
 
   c_slide_num_offset CONSTANT NUMBER := 0;
 
@@ -61,11 +83,62 @@ AS
 
   g_templates t_templates;
   g_slides t_all_slides;
-  
+
+  g_replace_value_tab t_replace_value_tab;
+  g_sub_character VARCHAR2(1);
 
   /*
     Private API
   */
+
+  FUNCTION convert_replace( p_replace_patterns IN t_vc_value_row
+                          , p_replace_values IN t_vc_value_tab
+                          )
+    RETURN t_replace_value_tab
+  AS
+    l_returnvalue t_replace_value_tab;
+  BEGIN
+    FOR i IN 1..p_replace_values.count LOOP
+      FOR j IN 1..p_replace_patterns.count LOOP
+        l_returnvalue(i)(p_replace_patterns(j)).varchar_value := p_replace_values(i)(j);
+      END LOOP;
+    END LOOP;
+    RETURN l_returnvalue;
+  END convert_replace;
+
+  FUNCTION convert_value ( p_value IN t_replace_value )
+    RETURN VARCHAR2
+  AS
+    l_returnvalue VARCHAR2(32767);
+  BEGIN
+    IF p_value.varchar_value IS NOT NULL THEN
+      l_returnvalue := p_value.varchar_value;
+    ELSIF p_value.number_value IS NOT NULL THEN
+      l_returnvalue := to_char( p_value.number_value, p_value.format_mask );
+    ELSIF p_value.date_value IS NOT NULL THEN
+      l_returnvalue := to_char( p_value.date_value, p_value.format_mask );
+    END IF;
+    RETURN l_returnvalue;
+  END convert_value;
+
+  FUNCTION replace_substitution( p_original IN CLOB
+                               , p_row_num IN PLS_INTEGER
+                               )
+    RETURN CLOB
+  AS
+    l_returnvalue CLOB := p_original;
+    l_current_index VARCHAR2(30);
+  BEGIN
+    l_current_index := g_replace_value_tab(p_row_num).FIRST;
+    WHILE l_current_index IS NOT NULL LOOP
+      l_returnvalue := REPLACE( l_returnvalue
+                              , g_sub_character || l_current_index || g_sub_character
+                              , convert_value(g_replace_value_tab(p_row_num)(l_current_index))
+                              );
+      l_current_index := g_replace_value_tab(p_row_num).NEXT(l_current_index);
+    END LOOP;
+    RETURN l_returnvalue;
+  END replace_substitution;
 
   PROCEDURE set_offsets
   AS
@@ -115,37 +188,53 @@ AS
     g_templates.notes_relations := zip_util_pkg.get_file_clob( g_base_file, c_template_notes_rel );
   END set_template_slide;
   
-  PROCEDURE process_slides
+  FUNCTION process_slide_relation( p_slide_num IN NUMBER )
+    RETURN CLOB
   AS
   BEGIN
-    NULL;
-  END process_slides;
+    RETURN REPLACE( g_templates.slide_relations, 'notesSlide1', 'notesSlide' || to_char(p_slide_num) );
+  END process_slide_relation;
+  
+  FUNCTION process_notes_relation( p_slide_num IN NUMBER )
+    RETURN CLOB
+  AS
+  BEGIN
+    RETURN REPLACE( g_templates.notes_relations, 'slide1', 'slide' || to_char(p_slide_num) );
+  END process_notes_relation;  
 
   -- Insert override tags into content types for each slide
-  PROCEDURE update_content_types
+  PROCEDURE update_content_types( p_file IN OUT NOCOPY BLOB )
   AS
     l_data XMLTYPE;
     l_domdoc dbms_xmldom.DOMDocument;
     l_root_node dbms_xmldom.DOMNode;
-    l_element dbms_xmldom.DOMElement;
+    l_slide_element dbms_xmldom.DOMElement;
     l_slide_node dbms_xmldom.DOMNode;
+    l_notes_element dbms_xmldom.DOMElement;
+    l_notes_node dbms_xmldom.DOMNode;
   BEGIN
     l_data := XMLTYPE(zip_util_pkg.get_file_clob(g_base_file, c_content_types_fname));
     l_domdoc := dbms_xmldom.newDOMDocument(l_data);
     l_root_node := dbms_xmldom.makeNode(DBMS_XMLDOM.getDocumentElement(l_domdoc));
     FOR i IN 2..g_slides.COUNT
     LOOP
-      l_element := dbms_xmldom.createElement(l_domdoc, 'Override');
-      dbms_xmldom.setAttribute(l_element, 'PartName', '/' || c_slide_dname || REPLACE(c_slide_pattern, '#NUM#', to_char(g_slides(i).slide_num)) );
-      dbms_xmldom.setAttribute(l_element, 'ContentType', c_slide_content_type);
-      l_slide_node := dbms_xmldom.appendChild(l_root_node, dbms_xmldom.makeNode(l_element));
+      l_slide_element := dbms_xmldom.createElement(l_domdoc, 'Override');
+      dbms_xmldom.setAttribute(l_slide_element, 'PartName', '/' || c_slide_dname || REPLACE(c_slide_fname_pattern, '#NUM#', to_char(g_slides(i).slide_num)) );
+      dbms_xmldom.setAttribute(l_slide_element, 'ContentType', c_slide_content_type);
+      l_slide_node := dbms_xmldom.appendChild(l_root_node, dbms_xmldom.makeNode(l_slide_element));
+      IF g_templates.notes IS NOT NULL THEN
+        l_notes_element := dbms_xmldom.createElement(l_domdoc, 'Override');
+        dbms_xmldom.setAttribute(l_notes_element, 'PartName', '/' || c_notes_dname || REPLACE(c_notes_fname_pattern, '#NUM#', to_char(g_slides(i).slide_num)) );
+        dbms_xmldom.setAttribute(l_notes_element, 'ContentType', c_notes_content_type);        
+        l_notes_node := dbms_xmldom.appendChild(l_root_node, dbms_xmldom.makeNode(l_notes_element));
+      END IF;
     END LOOP;
     dbms_xmldom.freeDocument(l_domdoc);
-    zip_util_pkg.add_file(g_base_file, c_content_types_fname, REPLACE(l_data.getClobVal, 'ISO-8859-15', 'UTF-8'));
+    zip_util_pkg.add_file(p_file, c_content_types_fname, REPLACE(l_data.getClobVal, 'ISO-8859-15', 'UTF-8'));
   END update_content_types;
 
   -- Insert slide id tag into slide id list of presentation for each slide
-  PROCEDURE update_presentation
+  PROCEDURE update_presentation( p_file IN OUT NOCOPY BLOB )
   AS
     l_data XMLTYPE;
     l_domdoc dbms_xmldom.DOMDocument;
@@ -172,11 +261,11 @@ AS
       l_slide_node := dbms_xmldom.appendChild(l_slide_list, dbms_xmldom.makeNode(l_element));
     END LOOP;
     dbms_xmldom.freeDocument(l_domdoc);
-    zip_util_pkg.add_file(g_base_file, c_presentation_fname, REPLACE(l_data.getClobVal, 'ISO-8859-15', 'UTF-8'));
+    zip_util_pkg.add_file(p_file, c_presentation_fname, REPLACE(l_data.getClobVal, 'ISO-8859-15', 'UTF-8'));
   END update_presentation;
   
   -- Insert relationship tag into presenation relations for every slide
-  PROCEDURE update_pres_rel
+  PROCEDURE update_pres_rel( p_file IN OUT NOCOPY BLOB )
   AS
     l_data XMLTYPE;
     l_domdoc dbms_xmldom.DOMDocument;
@@ -192,11 +281,11 @@ AS
       l_element := dbms_xmldom.createElement(l_domdoc, 'Relationship');
       dbms_xmldom.setAttribute(l_element, 'Id', 'rId' || to_char(g_slides(i).relation_id));
       dbms_xmldom.setAttribute(l_element, 'Type', c_sliderel_content_type);
-      dbms_xmldom.setAttribute(l_element, 'Target', 'slides/' || REPLACE(c_slide_pattern, '#NUM#', to_char(g_slides(i).slide_num)));
+      dbms_xmldom.setAttribute(l_element, 'Target', 'slides/' || REPLACE(c_slide_fname_pattern, '#NUM#', to_char(g_slides(i).slide_num)));
       l_slide_node := dbms_xmldom.appendChild(l_root_node, dbms_xmldom.makeNode(l_element));
     END LOOP;
     dbms_xmldom.freeDocument(l_domdoc);
-    zip_util_pkg.add_file(g_base_file, c_pres_rel_fname, REPLACE(l_data.getClobVal, 'ISO-8859-15', 'UTF-8'));
+    zip_util_pkg.add_file(p_file, c_pres_rel_fname, REPLACE(l_data.getClobVal, 'ISO-8859-15', 'UTF-8'));
   END update_pres_rel;
   
 
@@ -205,34 +294,70 @@ AS
   */
   
   FUNCTION convert_template ( p_template IN BLOB
-                            , p_replace_patterns IN t_str_array
-                            , p_replace_values IN t_replace_values_tab 
+                            , p_replace_patterns IN t_vc_value_row
+                            , p_replace_values IN t_vc_value_tab 
                             )
     RETURN BLOB
   AS
-    l_retval BLOB;
-    l_cur_blob BLOB;
-    l_current_slide t_single_slide;
   BEGIN
+    RETURN convert_template( p_template => p_template
+                           , p_replace_name_value => convert_replace( p_replace_patterns, p_replace_values )
+                           , p_substitution_pattern => NULL
+                           );
+  END convert_template;
+
+  FUNCTION convert_template ( p_template IN BLOB
+                            , p_replace_name_value IN t_replace_value_tab
+                            , p_substitution_pattern IN VARCHAR2 DEFAULT c_sub_character
+                            )
+    RETURN BLOB
+  AS
+    l_current_slide t_single_slide;
+    l_returnvalue BLOB;
+    l_current_file BLOB;
+  BEGIN
+    /* Init globals */
     g_base_file := p_template;
     g_file_list := zip_util_pkg.get_file_list (g_base_file);
-    
     set_template_slide;
     set_offsets;
+    g_replace_value_tab := p_replace_name_value;
+    g_sub_character := p_substitution_pattern;
     
-    -- create all slides based on template and add to new file
-    FOR i IN 1..p_replace_values.COUNT
+    -- Create all slides and notes based on template and add to file
+    FOR i IN 1..p_replace_name_value.COUNT
     LOOP
       l_current_slide.slide_num := c_slide_num_offset + i;
       l_current_slide.slide_id := g_slide_id_offset + i;
       l_current_slide.relation_id := g_slide_relation_id_offset + i;
-      l_current_slide.slide_data := string_util_pkg.multi_replace ( g_templates.slide, p_replace_patterns, p_replace_values(i));
-      /* TODO: Also replace values in notesSlide if it exists */
+      
+      /* Slide and Relations (always)*/      
+      l_current_slide.slide_data := replace_substitution( p_original => g_templates.slide
+                                                        , p_row_num => i
+                                                        );
+      zip_util_pkg.add_file ( l_returnvalue
+                            , c_slide_dname || REPLACE(c_slide_fname_pattern, '#NUM#', to_char(l_current_slide.slide_num))
+                            , l_current_slide.slide_data
+                            );
+      zip_util_pkg.add_file ( l_returnvalue
+                            , c_slide_rel_dname || REPLACE(c_slide_fname_pattern, '#NUM#', to_char(l_current_slide.slide_num)) || c_relation_suffix
+                            , process_slide_relation( l_current_slide.slide_num )
+                            );
+      /* Notes and Relations (only if notes exist) */
+      IF g_templates.notes IS NOT NULL THEN
+        l_current_slide.notes_data := replace_substitution( p_original => g_templates.notes
+                                                          , p_row_num => i
+                                                          );
+        zip_util_pkg.add_file ( l_returnvalue
+                              , c_notes_dname || REPLACE(c_notes_fname_pattern, '#NUM#', to_char(l_current_slide.slide_num))
+                              , l_current_slide.notes_data
+                              );
+        zip_util_pkg.add_file ( l_returnvalue
+                              , c_notes_rel_dname || REPLACE(c_notes_fname_pattern, '#NUM#', to_char(l_current_slide.slide_num)) || c_relation_suffix
+                              , process_notes_relation( l_current_slide.slide_num )
+                              );        
+      END IF;
       g_slides(i) := l_current_slide;
-      zip_util_pkg.add_file (l_retval, c_slide_dname || REPLACE(c_slide_pattern, '#NUM#', to_char(l_current_slide.slide_num)), l_current_slide.slide_data);
-      /* TODO: slide_relations need update if notes exist */
-      zip_util_pkg.add_file (l_retval, c_slide_rel_dname || REPLACE(c_slide_pattern, '#NUM#', to_char(l_current_slide.slide_num)) || c_relation_suffix, g_templates.slide_relations);
-      /* TODO: put generated notes and corresponding relations file into zip */
     END LOOP;
     
     -- slides prepared, loop through file content and adapt where needed
@@ -240,17 +365,20 @@ AS
     LOOP
       IF g_file_list(i) = c_content_types_fname
       THEN
-        update_content_types; --update content types file with overrides for slides
+        update_content_types(l_returnvalue); --update content types file with overrides for slides
       ELSIF g_file_list(i) = c_presentation_fname
       THEN
-        update_presentation; -- update presentation file with slide refs
+        update_presentation(l_returnvalue); -- update presentation file with slide refs
       ELSIF g_file_list(i) = c_pres_rel_fname
       THEN
-        update_pres_rel; --update presentation rels with slide infos
+        update_pres_rel(l_returnvalue); --update presentation rels with slide infos
+      ELSIF g_file_list(i) NOT LIKE c_slide_dname || '%' AND g_file_list(i) NOT LIKE c_notes_dname || '%'
+      THEN
+        zip_util_pkg.add_file( l_returnvalue, g_file_list(i), zip_util_pkg.get_file( g_base_file, g_file_list(i)));
       END IF;
     END LOOP;
-    zip_util_pkg.finish_zip (l_retval);
-    RETURN l_retval;
+    zip_util_pkg.finish_zip (l_returnvalue);
+    RETURN l_returnvalue;
   END convert_template;
 
 END PPTX_CREATOR_PKG;
