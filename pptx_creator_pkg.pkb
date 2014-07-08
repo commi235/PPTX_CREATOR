@@ -38,7 +38,16 @@ AS
     , notes CLOB
     , notes_relations CLOB
     );
+
+  TYPE t_col_values IS RECORD
+    ( varchar_values dbms_sql.varchar2a
+    , number_values dbms_sql.number_table
+    , date_values dbms_sql.date_table
+    , clob_values dbms_sql.clob_table
+    );
     
+  TYPE t_sql_rows IS TABLE OF t_col_values INDEX BY VARCHAR2(32767);
+
   /*
     Constants
   */
@@ -71,6 +80,7 @@ AS
   c_presentation_slide CONSTANT VARCHAR2(45 CHAR) := '<p:sldId id="#SLIDE_ID#" r:id="rId#REL_ID#"/>';
 
   c_slide_num_offset CONSTANT NUMBER := 0;
+  c_bulk_size CONSTANT PLS_INTEGER := 100;
 
   /*
     Globals
@@ -85,7 +95,7 @@ AS
   g_slides t_all_slides;
 
   g_replace_value_tab t_replace_value_tab;
-  g_sub_character VARCHAR2(1);
+  g_enclose_character VARCHAR2(1);
 
   /*
     Private API
@@ -105,6 +115,36 @@ AS
     END LOOP;
     RETURN l_returnvalue;
   END convert_replace;
+  
+  FUNCTION convert_replace( p_sql_result IN t_sql_rows )
+    RETURN t_replace_value_tab
+  AS
+    l_returnvalue t_replace_value_tab;
+    l_cur_col VARCHAR2(32767);
+  BEGIN
+    l_cur_col := p_sql_result.first();
+    WHILE l_cur_col IS NOT NULL LOOP
+      IF p_sql_result(l_cur_col).varchar_values.count > 0 THEN
+        FOR i IN 1..p_sql_result(l_cur_col).varchar_values.count LOOP
+          l_returnvalue(i)(l_cur_col).varchar_value := p_sql_result(l_cur_col).varchar_values(i);
+        END LOOP;
+      ELSIF p_sql_result(l_cur_col).number_values.count > 0 THEN
+        FOR i IN 1..p_sql_result(l_cur_col).number_values.count LOOP
+          l_returnvalue(i)(l_cur_col).number_value := p_sql_result(l_cur_col).number_values(i);
+        END LOOP;
+      ELSIF p_sql_result(l_cur_col).date_values.count > 0 THEN
+        FOR i IN 1..p_sql_result(l_cur_col).date_values.count LOOP
+          l_returnvalue(i)(l_cur_col).date_value := p_sql_result(l_cur_col).date_values(i);
+        END LOOP;
+      ELSIF p_sql_result(l_cur_col).clob_values.count > 0 THEN
+        FOR i IN 1..p_sql_result(l_cur_col).clob_values.count LOOP
+          l_returnvalue(i)(l_cur_col).clob_value := p_sql_result(l_cur_col).clob_values(i);
+        END LOOP;      
+      END IF;
+      l_cur_col := p_sql_result.next(l_cur_col);
+    END LOOP;
+    RETURN l_returnvalue;
+  END convert_replace;
 
   FUNCTION convert_value ( p_value IN t_replace_value )
     RETURN VARCHAR2
@@ -114,9 +154,19 @@ AS
     IF p_value.varchar_value IS NOT NULL THEN
       l_returnvalue := p_value.varchar_value;
     ELSIF p_value.number_value IS NOT NULL THEN
-      l_returnvalue := to_char( p_value.number_value, p_value.format_mask );
+      IF p_value.format_mask IS NOT NULL THEN
+        l_returnvalue := to_char( p_value.number_value, p_value.format_mask );
+      ELSE
+        l_returnvalue := to_char( p_value.number_value);
+      END IF;
     ELSIF p_value.date_value IS NOT NULL THEN
-      l_returnvalue := to_char( p_value.date_value, p_value.format_mask );
+      IF p_value.format_mask IS NOT NULL THEN
+        l_returnvalue := to_char( p_value.date_value, p_value.format_mask );
+      ELSE
+        l_returnvalue := to_char( p_value.date_value);
+      END IF;
+    ELSIF p_value.clob_value IS NOT NULL THEN
+      l_returnvalue := dbms_lob.substr(p_value.clob_value);
     END IF;
     RETURN l_returnvalue;
   END convert_value;
@@ -132,7 +182,7 @@ AS
     l_current_index := g_replace_value_tab(p_row_num).FIRST;
     WHILE l_current_index IS NOT NULL LOOP
       l_returnvalue := REPLACE( l_returnvalue
-                              , g_sub_character || l_current_index || g_sub_character
+                              , g_enclose_character || l_current_index || g_enclose_character
                               , convert_value(g_replace_value_tab(p_row_num)(l_current_index))
                               );
       l_current_index := g_replace_value_tab(p_row_num).NEXT(l_current_index);
@@ -302,13 +352,13 @@ AS
   BEGIN
     RETURN convert_template( p_template => p_template
                            , p_replace_name_value => convert_replace( p_replace_patterns, p_replace_values )
-                           , p_substitution_pattern => NULL
+                           , p_enclose_char => NULL
                            );
   END convert_template;
 
   FUNCTION convert_template ( p_template IN BLOB
                             , p_replace_name_value IN t_replace_value_tab
-                            , p_substitution_pattern IN VARCHAR2 DEFAULT c_sub_character
+                            , p_enclose_char IN VARCHAR2 DEFAULT c_enclose_character
                             )
     RETURN BLOB
   AS
@@ -322,10 +372,14 @@ AS
     set_template_slide;
     set_offsets;
     g_replace_value_tab := p_replace_name_value;
-    g_sub_character := p_substitution_pattern;
+    g_enclose_character := p_enclose_char;
+    
+    IF g_replace_value_tab.count = 0 THEN
+      RETURN NULL;
+    END IF;
     
     -- Create all slides and notes based on template and add to file
-    FOR i IN 1..p_replace_name_value.COUNT
+    FOR i IN 1..g_replace_value_tab.COUNT
     LOOP
       l_current_slide.slide_num := c_slide_num_offset + i;
       l_current_slide.slide_id := g_slide_id_offset + i;
@@ -379,6 +433,72 @@ AS
     END LOOP;
     zip_util_pkg.finish_zip (l_returnvalue);
     RETURN l_returnvalue;
+  END convert_template;
+
+  FUNCTION convert_template ( p_template IN BLOB
+                            , p_cursor IN OUT NOCOPY sys_refcursor
+                            , p_enclose_char IN VARCHAR2 DEFAULT c_enclose_character
+                            )
+    RETURN BLOB
+  AS
+    l_cursor_id PLS_INTEGER;
+    l_desc_tab dbms_sql.desc_tab2;
+    l_col_cnt PLS_INTEGER;
+    l_row_cnt PLS_INTEGER;
+    l_sql_result t_sql_rows;
+  BEGIN
+    l_cursor_id := dbms_sql.to_cursor_number( p_cursor );
+    dbms_sql.describe_columns2( l_cursor_id, l_col_cnt, l_desc_tab );
+    
+    -- Prepare the arrays
+    FOR i IN 1..l_col_cnt LOOP
+      CASE
+        WHEN l_desc_tab( i ).col_type IN ( 2, 100, 101 ) THEN
+          dbms_sql.define_array( l_cursor_id, i, l_sql_result(l_desc_tab(i).col_name).number_values, c_bulk_size, 1 );
+        WHEN l_desc_tab( i ).col_type IN ( 12, 178, 179, 180, 181 , 231 ) THEN
+          dbms_sql.define_array( l_cursor_id, i, l_sql_result(l_desc_tab(i).col_name).date_values, c_bulk_size, 1 );
+        WHEN l_desc_tab( i ).col_type IN ( 1, 8, 9, 96 ) THEN
+          dbms_sql.define_array( l_cursor_id, i, l_sql_result(l_desc_tab(i).col_name).varchar_values, c_bulk_size, 1 );
+        WHEN l_desc_tab( i ).col_type = 112 THEN
+          dbms_sql.define_array( l_cursor_id, i, l_sql_result(l_desc_tab(i).col_name).clob_values, c_bulk_size, 1 );
+        ELSE
+          NULL;
+      END CASE;      
+    END LOOP;
+    
+    -- Execute and fill arrays
+    l_row_cnt := dbms_sql.EXECUTE( l_cursor_id );
+    LOOP
+      l_row_cnt := dbms_sql.fetch_rows( l_cursor_id );
+      IF l_row_cnt > 0 THEN
+        FOR i IN 1..l_col_cnt LOOP
+          CASE
+            WHEN l_desc_tab( i ).col_type IN ( 2, 100, 101 ) THEN
+              dbms_sql.COLUMN_VALUE( l_cursor_id, i, l_sql_result(l_desc_tab(i).col_name).number_values);
+            WHEN l_desc_tab( i ).col_type IN ( 12, 178, 179, 180, 181 , 231 ) THEN
+              dbms_sql.COLUMN_VALUE( l_cursor_id, i, l_sql_result(l_desc_tab(i).col_name).date_values);
+            WHEN l_desc_tab( i ).col_type IN ( 1, 8, 9, 96 ) THEN
+              dbms_sql.COLUMN_VALUE( l_cursor_id, i, l_sql_result(l_desc_tab(i).col_name).varchar_values);
+            WHEN l_desc_tab( i ).col_type = 112 THEN
+              dbms_sql.COLUMN_VALUE( l_cursor_id, i, l_sql_result(l_desc_tab(i).col_name).clob_values);
+            ELSE
+              NULL;
+          END CASE;          
+        END LOOP;
+      END IF;
+      EXIT WHEN l_row_cnt != c_bulk_size;
+    END LOOP;
+    dbms_sql.close_cursor(l_cursor_id);
+    RETURN convert_template( p_template => p_template
+                           , p_replace_name_value => convert_replace( l_sql_result )
+                           , p_enclose_char => p_enclose_char
+                           );
+    EXCEPTION
+      WHEN OTHERS THEN
+        IF dbms_sql.is_open(l_cursor_id) THEN
+          dbms_sql.close_cursor(l_cursor_id);
+        END IF;
+        RETURN NULL;
   END convert_template;
 
 END PPTX_CREATOR_PKG;
