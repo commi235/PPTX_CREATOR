@@ -40,7 +40,7 @@ AS
     );
 
   TYPE t_col_values IS RECORD
-    ( varchar_values dbms_sql.varchar2a
+    ( varchar_values dbms_sql.varchar2_table
     , number_values dbms_sql.number_table
     , date_values dbms_sql.date_table
     , clob_values dbms_sql.clob_table
