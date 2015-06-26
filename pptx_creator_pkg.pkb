@@ -52,6 +52,8 @@ AS
     Constants
   */
   
+  c_version VARCHAR2(10) := '0.5.1';
+  
   /* Static filenames for top level files */
   c_content_types_fname CONSTANT VARCHAR(19 CHAR) := '[Content_Types].xml';
   c_presentation_fname CONSTANT VARCHAR2(20 CHAR) := 'ppt/presentation.xml';
@@ -343,6 +345,28 @@ AS
     Public API
   */
   
+  FUNCTION get_substitutions( p_template IN BLOB
+                            , p_enclose_char IN VARCHAR2 DEFAULT c_enclose_character
+                            )
+    RETURN t_vc_value_row
+  AS
+    l_template_slide CLOB;
+    l_retval t_vc_value_row := t_vc_value_row();
+    l_search_string VARCHAR2(100);
+    l_sub_cnt PLS_INTEGER;
+  BEGIN
+    l_template_slide := zip_util_pkg.get_file_clob( p_template, c_template_slide );
+    l_search_string := p_enclose_char || '[[:alnum:]_]+' || p_enclose_char;
+    l_sub_cnt := regexp_count( l_template_slide, l_search_string );
+    FOR i IN 1..l_sub_cnt
+    LOOP
+      l_retval.extend();
+      l_retval(i) := regexp_substr( l_template_slide, l_search_string, 1, i );
+    END LOOP;
+    RETURN l_retval;
+  END get_substitutions;
+
+  
   FUNCTION convert_template ( p_template IN BLOB
                             , p_replace_patterns IN t_vc_value_row
                             , p_replace_values IN t_vc_value_tab 
@@ -498,8 +522,15 @@ AS
         IF dbms_sql.is_open(l_cursor_id) THEN
           dbms_sql.close_cursor(l_cursor_id);
         END IF;
-        RETURN NULL;
+        RAISE;
   END convert_template;
+
+  FUNCTION get_version
+    RETURN VARCHAR2
+  AS
+  BEGIN
+    RETURN c_version;
+  END get_version;
 
 END PPTX_CREATOR_PKG;
 /

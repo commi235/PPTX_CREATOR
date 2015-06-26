@@ -49,6 +49,12 @@ AS
   */
   TYPE t_replace_value_tab IS TABLE OF t_replace_value_row INDEX BY PLS_INTEGER;
 
+  FUNCTION get_substitutions( p_template IN BLOB
+                            , p_enclose_char IN VARCHAR2 DEFAULT c_enclose_character
+                            )
+    RETURN t_vc_value_row;
+
+
   /**
   * Converts the given template into a slide-deck.
   * This is the simpler interface just taking varchar values.
@@ -90,6 +96,9 @@ AS
                             , p_enclose_char IN VARCHAR2 DEFAULT c_enclose_character
                             )
     RETURN BLOB;
+
+  FUNCTION get_version
+    RETURN VARCHAR2;
 
 END PPTX_CREATOR_PKG;
 /
