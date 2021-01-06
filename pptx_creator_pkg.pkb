@@ -1,6 +1,12 @@
 create or replace PACKAGE BODY PPTX_CREATOR_PKG
 AS
 
+  $IF $$apex_installed IS NULL $THEN
+    $error q'[Set CCFLAG apex_installed to either 0 or 1.
+    e.g. ALTER SESSION SET plsql_ccflags = 'apex_installed:1';
+    ]' $end
+  $END
+
   /*
     Types
   */
@@ -48,6 +54,10 @@ AS
     
   TYPE t_sql_rows IS TABLE OF t_col_values INDEX BY VARCHAR2(32767);
 
+$IF $$apex_installed = 1 $THEN
+  TYPE t_ir_cols IS TABLE OF apex_application_page_ir_col.report_label%TYPE INDEX BY apex_application_page_ir_col.column_alias%TYPE;
+$END
+  
   /*
     Constants
   */
@@ -233,11 +243,18 @@ AS
 
   PROCEDURE set_template_slide
   AS
+    l_notes_exist BOOLEAN := FALSE;
   BEGIN
     g_templates.slide := zip_util_pkg.get_file_clob( g_base_file, c_template_slide );
     g_templates.slide_relations := zip_util_pkg.get_file_clob( g_base_file, c_template_slide_rel );
-    g_templates.notes := zip_util_pkg.get_file_clob( g_base_file, c_template_notes );
-    g_templates.notes_relations := zip_util_pkg.get_file_clob( g_base_file, c_template_notes_rel );
+    FOR i IN 1..g_file_list.count LOOP
+      l_notes_exist := (g_file_list(i) = c_template_notes);
+      EXIT WHEN l_notes_exist;
+    END LOOP;
+    IF l_notes_exist THEN
+      g_templates.notes := zip_util_pkg.get_file_clob( g_base_file, c_template_notes );
+      g_templates.notes_relations := zip_util_pkg.get_file_clob( g_base_file, c_template_notes_rel );
+    END IF;
   END set_template_slide;
   
   FUNCTION process_slide_relation( p_slide_num IN NUMBER )
@@ -360,17 +377,316 @@ AS
     l_sub_cnt := regexp_count( l_template_slide, l_search_string );
     FOR i IN 1..l_sub_cnt
     LOOP
-      l_retval.extend();
-      l_retval(i) := regexp_substr( l_template_slide, l_search_string, 1, i );
+      l_retval.EXTEND();
+      l_retval(i) := TRIM( BOTH p_enclose_char FROM regexp_substr( l_template_slide, l_search_string, 1, i ) );
     END LOOP;
     RETURN l_retval;
   END get_substitutions;
 
+  FUNCTION get_substitutions_tf( p_template IN BLOB
+                               , p_enclose_char IN VARCHAR2 DEFAULT c_enclose_character
+                               )
+    RETURN t_vc_value_row PIPELINED
+  AS
+    l_template_slide CLOB;
+    l_search_string VARCHAR2(100);
+    l_sub_cnt PLS_INTEGER;
+  BEGIN
+    l_template_slide := zip_util_pkg.get_file_clob( p_template, c_template_slide );
+    l_search_string := p_enclose_char || '[[:alnum:]_]+' || p_enclose_char;
+    l_sub_cnt := regexp_count( l_template_slide, l_search_string );
+    FOR i IN 1..l_sub_cnt
+    LOOP
+      PIPE ROW( TRIM( BOTH p_enclose_char FROM regexp_substr( l_template_slide, l_search_string, 1, i ) ) );
+    END LOOP;  
+    RETURN;
+  END get_substitutions_tf;
+
+$IF $$apex_installed = 1 $THEN
+  FUNCTION get_ir_region_id( p_application_id IN apex_applications.application_id%TYPE
+                           , p_app_page_id IN apex_application_pages.page_id%TYPE
+                           )
+    RETURN NUMBER
+  AS
+    l_region_id NUMBER;
+  BEGIN
+    SELECT region_id
+      INTO l_region_id
+      FROM apex_application_page_ir
+     WHERE application_id = p_application_id
+       AND page_id = p_app_page_id
+    ;
+    RETURN l_region_id;
+  EXCEPTION
+    WHEN TOO_MANY_ROWS THEN
+      apex_debug.ERROR( p_message => 'WARNING: More than 1 IR Region on page %s, choose p_ir_region_id!'
+                      , p0        => TO_CHAR (p_app_page_id)
+                      );
+      raise_application_error( num => -20002
+                             , msg => 'Error retrieving Region ID, check APEX Debug Messages!'
+                             );
+      RETURN NULL;
+    WHEN NO_DATA_FOUND THEN
+      apex_debug.ERROR( p_message => 'WARNING: There is NO IR Region on page %s!'
+                      , p0        => TO_CHAR (p_app_page_id)
+                      );
+      raise_application_error( num => -20002
+                             , msg => 'Error retrieving Region ID, check APEX Debug Messages!'
+                             );
+      RETURN NULL;
+  END get_ir_region_id;
+
+  FUNCTION get_sub_map( p_template IN BLOB
+                      , p_enclose_char IN VARCHAR2 DEFAULT c_enclose_character
+                      , p_sql IN VARCHAR2
+                      )
+    RETURN t_col_map_tab
+  AS
+    l_sql_cols t_pi_by_vc;
+    l_list_values VARCHAR2(4000);
+    l_cur_col_idx VARCHAR2(32767);
+    
+    l_subs t_vc_value_row;
+    l_cur_row t_col_map_rec;
+    l_retval t_col_map_tab := t_col_map_tab();
+    
+  BEGIN
+    l_sql_cols := get_sql_cols( p_sql => p_sql );
+    l_cur_col_idx := l_sql_cols.FIRST;
+    WHILE l_cur_col_idx IS NOT NULL LOOP
+      l_list_values := l_list_values || l_cur_col_idx || ';' || l_sql_cols( l_cur_col_idx ) || ',';
+      l_cur_col_idx := l_sql_cols.next( l_cur_col_idx );
+    END LOOP;
+    l_list_values := RTRIM( l_list_values, ',' );
+    
+    l_subs := get_substitutions( p_template => p_template
+                               , p_enclose_char => p_enclose_char
+                               );
+    FOR i IN 1..l_subs.count LOOP
+      l_cur_row.sub_name := l_subs(i);
+      l_cur_row.map_col :=
+        apex_item.select_list( p_idx => 2 
+                             , p_value => CASE
+                                            WHEN l_sql_cols.exists( l_cur_row.sub_name )
+                                              THEN l_sql_cols( l_cur_row.sub_name )
+                                              ELSE NULL
+                                          END
+                             , p_list_values => l_list_values
+                             , p_show_null => 'YES'
+                             , p_null_value => NULL
+                             , p_null_text => '- Choose -'
+                             );
+      l_retval.EXTEND;
+      l_retval(i) := l_cur_row;
+    END LOOP;
+    RETURN l_retval;
+  END get_sub_map;
+
+  FUNCTION get_sub_map( p_template IN BLOB
+                      , p_enclose_char IN VARCHAR2 DEFAULT c_enclose_character
+                      , p_sql IN VARCHAR2
+                      , p_ir_cols t_ir_cols
+                      )
+    RETURN t_col_map_tab
+  AS
+    l_sql_cols t_pi_by_vc;
+    l_list_values VARCHAR2(4000);
+    l_cur_col_idx VARCHAR2(32767);
+    
+    l_subs t_vc_value_row;
+    l_cur_row t_col_map_rec;
+    l_retval t_col_map_tab := t_col_map_tab();
+    
+  BEGIN
+    l_sql_cols := get_sql_cols( p_sql => p_sql );
+    l_cur_col_idx := l_sql_cols.FIRST;
+    WHILE l_cur_col_idx IS NOT NULL LOOP
+      l_list_values := l_list_values 
+                    || CASE WHEN p_ir_cols.EXISTS( l_cur_col_idx )
+                              THEN p_ir_cols( l_cur_col_idx )
+                            ELSE l_cur_col_idx
+                       END
+                    || ';' 
+                    || l_sql_cols( l_cur_col_idx )
+                    || ',';
+      l_cur_col_idx := l_sql_cols.next( l_cur_col_idx );
+    END LOOP;
+    l_list_values := rtrim( l_list_values, ',' );
+    APEX_DEBUG.message( p_message => 'Value of LOV is: %s', p0 => l_list_values );
+    
+    l_subs := get_substitutions( p_template => p_template
+                               , p_enclose_char => p_enclose_char
+                               );
+    FOR i IN 1..l_subs.count LOOP
+      l_cur_row.sub_name := l_subs(i);
+      l_cur_row.map_col :=
+        apex_item.select_list( p_idx => 2 
+                             , p_value => CASE
+                                            WHEN l_sql_cols.exists( l_cur_row.sub_name )
+                                              THEN l_sql_cols( l_cur_row.sub_name )
+                                              ELSE NULL
+                                          END
+                             , p_list_values => l_list_values
+                             , p_show_null => 'YES'
+                             , p_null_value => NULL
+                             , p_null_text => '- Choose -'
+                             ) ||
+        apex_item.hidden( p_idx => 1, p_value => l_subs(i) );
+      l_retval.EXTEND;
+      l_retval(i) := l_cur_row;
+    END LOOP;
+    RETURN l_retval;
+  END get_sub_map;
+
+  FUNCTION get_sub_map_tf( p_template_tab IN VARCHAR2
+                         , p_blob_col IN VARCHAR2
+                         , p_search_col IN VARCHAR2
+                         , p_search_value IN VARCHAR2
+                         , p_enclose_char IN VARCHAR2 DEFAULT c_enclose_character
+                         , p_sql IN VARCHAR2
+                         )
+    RETURN t_col_map_tab PIPELINED
+  AS
+    l_template BLOB;
+    l_data t_col_map_tab;
+    l_blob_sql VARCHAR2(4000);
+  BEGIN
+    l_blob_sql := 'SELECT ' || p_blob_col ||
+                  '  FROM ' || sys.dbms_assert.sql_object_name( p_template_tab ) ||
+                  ' WHERE ' || p_search_col || '= :SEARCH_VAL';
   
-  FUNCTION convert_template ( p_template IN BLOB
-                            , p_replace_patterns IN t_vc_value_row
-                            , p_replace_values IN t_vc_value_tab 
-                            )
+    EXECUTE IMMEDIATE l_blob_sql INTO l_template USING p_search_value;
+    
+    l_data := get_sub_map( p_template => l_template
+                         , p_enclose_char => p_enclose_char
+                         , p_sql => p_sql
+                         );    
+    FOR i IN 1..l_data.count LOOP
+      PIPE ROW( l_data(i) );
+    END LOOP;
+    RETURN;
+  END get_sub_map_tf;
+  
+  FUNCTION get_sub_map_tf( p_template_tab IN VARCHAR2
+                         , p_blob_col IN VARCHAR2
+                         , p_search_col IN VARCHAR2
+                         , p_search_value IN VARCHAR2
+                         , p_enclose_char IN VARCHAR2 DEFAULT c_enclose_character
+                         , p_app_id IN NUMBER DEFAULT nv('APP_ID')
+                         , p_app_page_id IN NUMBER DEFAULT nv('APP_PAGE_ID')
+                         , p_ir_region_id IN NUMBER DEFAULT NULL
+                         )
+    RETURN t_col_map_tab PIPELINED
+  AS
+    l_template BLOB;
+    l_data t_col_map_tab;
+    l_blob_sql VARCHAR2(4000);
+    l_ir_region_id NUMBER;
+    l_report apex_ir.t_report;
+    l_ir_cols t_ir_cols;
+
+    PROCEDURE get_ir_cols
+    AS
+    BEGIN
+      FOR rec IN ( SELECT column_alias, report_label
+                     FROM apex_application_page_ir_col
+                    WHERE region_id = l_ir_region_id
+                  )
+      LOOP
+        apex_debug.message( 'Alias: %s; Label: %s', rec.column_alias, rec.report_label );
+        l_ir_cols(rec.column_alias) := rec.report_label;
+      END LOOP;
+    END get_ir_cols;
+  BEGIN
+    l_ir_region_id := COALESCE( p_ir_region_id
+                              , get_ir_region_id( p_application_id => p_app_id
+                                                , p_app_page_id => p_app_page_id
+                                                )
+                              );       
+    apex_debug.message( p_message => 'IR Region ID: %s', p0 => l_ir_region_id );
+    get_ir_cols;
+    l_report := apex_ir.get_report( p_page_id => p_app_page_id
+                                  , p_region_id => l_ir_region_id
+                                  );
+    
+    l_blob_sql := 'SELECT ' || p_blob_col ||
+                  '  FROM ' || sys.dbms_assert.sql_object_name( p_template_tab ) ||
+                  ' WHERE ' || p_search_col || '= :SEARCH_VAL';
+  
+    EXECUTE IMMEDIATE l_blob_sql INTO l_template USING p_search_value;
+    
+    l_data := get_sub_map( p_template => l_template
+                         , p_enclose_char => p_enclose_char
+                         , p_sql => l_report.sql_query
+                         , p_ir_cols => l_ir_cols
+                         );    
+    FOR i IN 1..l_data.count LOOP
+      PIPE ROW( l_data(i) );
+    END LOOP;
+    RETURN;
+  END get_sub_map_tf;
+$END
+
+  FUNCTION get_sql_cols( p_sql IN VARCHAR2 )
+    RETURN t_pi_by_vc
+  AS
+    l_retval t_pi_by_vc;
+    l_cursor_id PLS_INTEGER;
+    l_desc_tab dbms_sql.desc_tab2;
+    l_col_cnt PLS_INTEGER;
+  BEGIN
+    l_cursor_id := dbms_sql.open_cursor;
+    dbms_sql.parse( l_cursor_id, p_sql, dbms_sql.native );
+    dbms_sql.describe_columns2( l_cursor_id, l_col_cnt, l_desc_tab );
+    FOR c IN 1..l_col_cnt LOOP
+      l_retval(l_desc_tab(c).col_name) := c;
+    END LOOP;
+    RETURN l_retval;
+  END get_sql_cols;
+
+  FUNCTION get_sql_col_info( p_sql IN VARCHAR2 )
+    RETURN t_col_info_tab PIPELINED
+  AS
+    l_retval t_col_info_tab;
+    l_cursor_id PLS_INTEGER;
+    l_desc_tab dbms_sql.desc_tab2;
+    l_col_cnt PLS_INTEGER;
+    l_cur_col_info t_col_info_rec;
+  BEGIN
+    l_cursor_id := dbms_sql.open_cursor;
+    dbms_sql.parse( l_cursor_id, p_sql, dbms_sql.native );
+    dbms_sql.describe_columns2( l_cursor_id, l_col_cnt, l_desc_tab );
+    FOR c IN 1..l_col_cnt LOOP
+      l_cur_col_info.col_position := c;
+      l_cur_col_info.col_name := l_desc_tab(c).col_name;
+      PIPE ROW( l_cur_col_info );
+    END LOOP;
+    RETURN;    
+  END get_sql_col_info;
+
+$IF $$apex_installed = 1 $THEN
+  FUNCTION convert_col_sub_map( p_mapping IN VARCHAR2 )
+    RETURN t_vc_by_pi
+  AS
+    l_col_sub_map t_vc_by_pi;
+    l_vcarr_outer apex_application_global.vc_arr2;
+    l_key PLS_INTEGER;
+    l_value VARCHAR2(32767);
+  BEGIN
+    l_vcarr_outer := apex_util.string_to_table( p_mapping );
+    FOR i IN 1..l_vcarr_outer.count LOOP
+      l_key := TO_NUMBER( SUBSTR( l_vcarr_outer(i), INSTR( l_vcarr_outer(i), ',' ) + 1 ) );
+      l_value := SUBSTR( l_vcarr_outer(i), 1, INSTR( l_vcarr_outer(i), ',' ) - 1 );
+      l_col_sub_map(l_key) := l_value;
+    END LOOP;
+    RETURN l_col_sub_map;
+  END convert_col_sub_map;
+$END
+  
+  FUNCTION convert_template( p_template IN BLOB
+                           , p_replace_patterns IN t_vc_value_row
+                           , p_replace_values IN t_vc_value_tab 
+                           )
     RETURN BLOB
   AS
   BEGIN
@@ -397,11 +713,7 @@ AS
     set_offsets;
     g_replace_value_tab := p_replace_name_value;
     g_enclose_character := p_enclose_char;
-    
-    IF g_replace_value_tab.count = 0 THEN
-      RETURN NULL;
-    END IF;
-    
+        
     -- Create all slides and notes based on template and add to file
     FOR i IN 1..g_replace_value_tab.COUNT
     LOOP
@@ -470,12 +782,14 @@ AS
     l_col_cnt PLS_INTEGER;
     l_row_cnt PLS_INTEGER;
     l_sql_result t_sql_rows;
+    l_col_values t_col_values;
   BEGIN
     l_cursor_id := dbms_sql.to_cursor_number( p_cursor );
     dbms_sql.describe_columns2( l_cursor_id, l_col_cnt, l_desc_tab );
     
     -- Prepare the arrays
     FOR i IN 1..l_col_cnt LOOP
+      l_sql_result(l_desc_tab(i).col_name) := l_col_values;
       CASE
         WHEN l_desc_tab( i ).col_type IN ( 2, 100, 101 ) THEN
           dbms_sql.define_array( l_cursor_id, i, l_sql_result(l_desc_tab(i).col_name).number_values, c_bulk_size, 1 );
@@ -489,9 +803,8 @@ AS
           NULL;
       END CASE;      
     END LOOP;
-    
-    -- Execute and fill arrays
-    l_row_cnt := dbms_sql.EXECUTE( l_cursor_id );
+
+    -- Fetch as cursor is already open.    
     LOOP
       l_row_cnt := dbms_sql.fetch_rows( l_cursor_id );
       IF l_row_cnt > 0 THEN
@@ -522,8 +835,177 @@ AS
         IF dbms_sql.is_open(l_cursor_id) THEN
           dbms_sql.close_cursor(l_cursor_id);
         END IF;
-        RAISE;
+        raise_application_error( -20001, 'Unknown error inspect error stack', TRUE);
   END convert_template;
+
+$IF $$apex_installed = 1 $THEN
+  FUNCTION convert_template( p_template IN BLOB
+                           , p_report IN apex_ir.t_report
+                           , p_col_sub_map IN t_vc_by_pi
+                           , p_enclose_char IN VARCHAR2 DEFAULT c_enclose_character
+                           )
+    RETURN BLOB
+  AS
+    l_cursor_id PLS_INTEGER;
+    l_desc_tab dbms_sql.desc_tab2;
+    l_col_cnt PLS_INTEGER;
+    l_row_cnt PLS_INTEGER;
+    l_sql_result t_sql_rows;
+    l_col_values t_col_values;
+  BEGIN
+    l_cursor_id := dbms_sql.open_cursor;
+    dbms_sql.parse( l_cursor_id, p_report.sql_query, dbms_sql.NATIVE );
+    dbms_sql.describe_columns2( l_cursor_id, l_col_cnt, l_desc_tab );
+
+    FOR i IN 1..p_report.binds.count LOOP
+      dbms_sql.bind_variable( l_cursor_id, p_report.binds(i).name, p_report.binds(i).value );
+    END LOOP;
+
+    FOR i IN 1..l_col_cnt LOOP
+      IF p_col_sub_map.exists(i) THEN
+        l_sql_result(p_col_sub_map(i)) := l_col_values;
+        CASE
+          WHEN l_desc_tab( i ).col_type IN ( 2, 100, 101 ) THEN
+            dbms_sql.define_array( l_cursor_id, i, l_sql_result(p_col_sub_map(i)).number_values, c_bulk_size, 1 );
+          WHEN l_desc_tab( i ).col_type IN ( 12, 178, 179, 180, 181 , 231 ) THEN
+            dbms_sql.define_array( l_cursor_id, i, l_sql_result(p_col_sub_map(i)).date_values, c_bulk_size, 1 );
+          WHEN l_desc_tab( i ).col_type IN ( 1, 8, 9, 96 ) THEN
+            dbms_sql.define_array( l_cursor_id, i, l_sql_result(p_col_sub_map(i)).varchar_values, c_bulk_size, 1 );
+          WHEN l_desc_tab( i ).col_type = 112 THEN
+            dbms_sql.define_array( l_cursor_id, i, l_sql_result(p_col_sub_map(i)).clob_values, c_bulk_size, 1 );
+          ELSE
+            NULL;
+        END CASE;
+      END IF;
+    END LOOP;
+    
+    l_row_cnt := dbms_sql.EXECUTE( l_cursor_id );
+    LOOP
+      l_row_cnt := dbms_sql.fetch_rows( l_cursor_id );
+      IF l_row_cnt > 0 THEN
+        FOR i IN 1..l_col_cnt LOOP
+          IF p_col_sub_map.EXISTS(i) THEN
+            CASE
+              WHEN l_desc_tab( i ).col_type IN ( 2, 100, 101 ) THEN
+                dbms_sql.COLUMN_VALUE( l_cursor_id, i, l_sql_result(p_col_sub_map(i)).number_values);
+              WHEN l_desc_tab( i ).col_type IN ( 12, 178, 179, 180, 181 , 231 ) THEN
+                dbms_sql.COLUMN_VALUE( l_cursor_id, i, l_sql_result(p_col_sub_map(i)).date_values);
+              WHEN l_desc_tab( i ).col_type IN ( 1, 8, 9, 96 ) THEN
+                dbms_sql.COLUMN_VALUE( l_cursor_id, i, l_sql_result(p_col_sub_map(i)).varchar_values);
+              WHEN l_desc_tab( i ).col_type = 112 THEN
+                dbms_sql.COLUMN_VALUE( l_cursor_id, i, l_sql_result(p_col_sub_map(i)).clob_values);
+              ELSE
+                NULL;
+            END CASE;
+          END IF;
+        END LOOP;
+      END IF;
+      EXIT WHEN l_row_cnt != c_bulk_size;
+    END LOOP;
+    dbms_sql.close_cursor(l_cursor_id);
+    RETURN convert_template( p_template => p_template
+                           , p_replace_name_value => convert_replace( l_sql_result )
+                           , p_enclose_char => p_enclose_char
+                           );
+
+    EXCEPTION
+      WHEN OTHERS THEN
+        IF dbms_sql.is_open(l_cursor_id) THEN
+          dbms_sql.close_cursor(l_cursor_id);
+        END IF;
+        raise_application_error( -20001, 'Unknown error inspect error backtrace', TRUE);
+  END convert_template;
+
+  FUNCTION convert_template( p_template IN BLOB
+                           , p_report IN apex_ir.t_report
+                           , p_col_sub_map_vc IN VARCHAR2
+                           , p_enclose_char IN VARCHAR2 DEFAULT c_enclose_character
+                           )
+    RETURN BLOB
+  AS
+  BEGIN
+    RETURN convert_template( p_template => p_template
+                           , p_report => p_report
+                           , p_col_sub_map => convert_col_sub_map( p_col_sub_map_vc )
+                           , p_enclose_char => p_enclose_char
+                           );
+  END convert_template;
+
+  FUNCTION convert_template( p_template IN BLOB
+                           , p_application_id IN NUMBER DEFAULT nv('APP_ID')
+                           , p_app_page_id IN NUMBER DEFAULT nv('APP_PAGE_ID')
+                           , p_ir_region_id IN NUMBER DEFAULT NULL
+                           , p_col_sub_map IN t_vc_by_pi
+                           , p_enclose_char IN VARCHAR2 DEFAULT c_enclose_character
+                           )
+    RETURN BLOB
+  AS
+    l_report apex_ir.t_report;
+  BEGIN
+    l_report := apex_ir.get_report( p_app_page_id
+                                  , COALESCE( p_ir_region_id
+                                            , get_ir_region_id( p_application_id => p_application_id
+                                                              , p_app_page_id => p_app_page_id
+                                                              )
+                                            )
+                                  );
+    RETURN convert_template( p_template => p_template
+                           , p_report => l_report
+                           , p_col_sub_map => p_col_sub_map
+                           , p_enclose_char => p_enclose_char
+                           );
+  END convert_template;
+
+  FUNCTION convert_template( p_template IN BLOB
+                           , p_application_id IN NUMBER DEFAULT nv('APP_ID')
+                           , p_app_page_id IN NUMBER DEFAULT nv('APP_PAGE_ID')
+                           , p_ir_region_id IN NUMBER DEFAULT NULL
+                           , p_col_sub_map_vc IN VARCHAR2
+                           , p_enclose_char IN VARCHAR2 DEFAULT c_enclose_character
+                           )
+    RETURN BLOB
+  AS
+  BEGIN
+    RETURN convert_template( p_template => p_template
+                           , p_application_id => p_application_id
+                           , p_app_page_id => p_app_page_id
+                           , p_ir_region_id => p_ir_region_id
+                           , p_col_sub_map => convert_col_sub_map( p_col_sub_map_vc )
+                           , p_enclose_char => p_enclose_char
+                           );
+  END convert_template;
+  
+  PROCEDURE download( p_template IN BLOB
+                    , p_application_id IN NUMBER DEFAULT nv('APP_ID')
+                    , p_app_page_id IN NUMBER DEFAULT nv('APP_PAGE_ID')
+                    , p_ir_region_id IN NUMBER DEFAULT NULL
+                    , p_col_sub_map_vc IN VARCHAR2
+                    , p_enclose_char IN VARCHAR2 DEFAULT c_enclose_character
+                    , p_filename IN VARCHAR2
+                    )
+  AS
+    l_result BLOB;
+  BEGIN
+    l_result := convert_template( p_template => p_template
+                                , p_application_id => p_application_id
+                                , p_app_page_id => p_app_page_id
+                                , p_ir_region_id => p_ir_region_id
+                                , p_col_sub_map_vc => p_col_sub_map_vc
+                                , p_enclose_char => p_enclose_char
+                                );
+    OWA_UTIL.mime_header( 'application/octet', FALSE );
+    HTP.p ( 'Content-length: ' || dbms_lob.getlength( l_result ) );
+    HTP.p ( 'Content-Disposition: attachment; filename="' 
+         || NVL( p_filename
+               , 'App' || to_char(p_application_id) || '_' 
+              || 'Page' || to_char(p_app_page_id)
+               )
+         || '_' || to_char( sysdate, 'YYYYMMDD' ) || '.pptx"' );
+    OWA_UTIL.http_header_close;
+    WPG_DOCLOAD.download_file( l_result );
+    apex_application.stop_apex_engine;
+  END download;
+$END
 
   FUNCTION get_version
     RETURN VARCHAR2
